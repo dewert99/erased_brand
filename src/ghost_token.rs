@@ -24,10 +24,10 @@ impl WithGhostToken<()> {
     /// use ghost_cell::GhostToken;
     /// use erased_brand::ghost_token::WithGhostToken;
     /// fn new_ghost_token<T>(f: impl for<'brand> FnOnce(GhostToken<'brand>) -> T) -> T {
-    ///     WithGhostToken::<()>::new_token().into_inner(|((), gt)| f(gt))
+    ///     WithGhostToken::new_token().into_inner(|((), gt)| f(gt))
     /// }
     /// ```
-    pub fn new_token() -> WithGhostToken<()> {
+    pub fn new_token() -> Self {
         let g = unsafe { static_ghost_token() };
         Self::new(((), g))
     }
@@ -41,16 +41,15 @@ impl<T: Branded2 + for<'brand> Branded<This<'brand> = Erased<Branded2Wrap<'brand
         // SAFETY
         // The outer brand contained a GhostToken so it be used with any other structs with singleton types
         // After removing it's ghost token it has no singleton types so it is safe to flatten into the inner brand
-        unsafe { self.map(|(data, _g), _| (data)).flatten() }
+        unsafe { self.map(|(data, _g), _| data).flatten() }
     }
 }
-
 
 impl<T: Branded> Erased<T> {
     pub fn from_ghost_token(
         f: impl for<'brand> FnOnce(GhostToken<'brand>) -> T::This<'brand>,
     ) -> Erased<T> {
-        WithGhostToken::<()>::new_token().map(|g, _| f(g.1))
+        WithGhostToken::new_token().map(|g, _| f(g.1))
     }
 }
 
@@ -58,7 +57,7 @@ impl<T: Branded> WithGhostToken<T> {
     pub fn new_with_token(
         f: impl for<'brand> FnOnce(&mut GhostToken<'brand>) -> T::This<'brand>,
     ) -> WithGhostToken<T> {
-        WithGhostToken::<()>::new_token().map(|mut g, _| (f(&mut g.1), g.1))
+        WithGhostToken::new_token().map(|mut g, _| (f(&mut g.1), g.1))
     }
 
     pub fn merge_tokens<U: Branded>(self, other: Erased<U>) -> Erased<Flattened<(T, U)>> {
@@ -66,4 +65,3 @@ impl<T: Branded> WithGhostToken<T> {
             .flatten_ghost_tokens()
     }
 }
-

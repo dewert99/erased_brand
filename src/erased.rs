@@ -1,6 +1,42 @@
 use crate::hkt::*;
 use core::marker::PhantomData;
 
+/// Essentially an alias for `FnOnce(&'a T::This<'brand>) -> Self::Output` including a blanket impl
+pub trait BrandFn<'a, T: Branded> {
+    type Output
+    where
+        T: 'a;
+
+    fn call<'brand>(self, x: &'a T::This<'brand>) -> Self::Output;
+}
+
+/// Essentially an alias for `FnOnce(&'a mut T::This<'brand>) -> Self::Output` including a blanket impl
+pub trait BrandMutFn<'a, T: Branded> {
+    type Output
+    where
+        T: 'a;
+
+    fn call<'brand>(self, x: &'a mut T::This<'brand>) -> Self::Output;
+}
+
+impl<'a, T: Branded, F: for<'brand> FnOnce(&'a T::This<'brand>) -> U, U> BrandFn<'a, T> for F {
+    type Output = U where T: 'a;
+
+    fn call<'brand>(self, x: &'a T::This<'brand>) -> U {
+        self(x)
+    }
+}
+
+impl<'a, T: Branded, F: for<'brand> FnOnce(&'a mut T::This<'brand>) -> U, U> BrandMutFn<'a, T>
+    for F
+{
+    type Output = U where T: 'a;
+
+    fn call<'brand>(self, x: &'a mut T::This<'brand>) -> U {
+        self(x)
+    }
+}
+
 /// Wrapper around a `Branded` that erases it's brand
 /// an `Erased<T>` acts similar to `T::This<'static>`,
 /// but ensures that two erased types can't be seen to share there lifetime parameter.
@@ -31,14 +67,15 @@ impl<T: Branded> Erased<T> {
     ///
     /// Note: using the naive signature:
     /// `(&'a self, f: impl for<'brand> FnOnce(&'a T::This<'brand>) -> U) -> U`
-    /// would be unsound when `'a` was instanciated with `'static` resulting in
+    /// would be unsound when `'a` was instantiated with `'static` resulting in
     /// `(&'static self, f: impl for<'brand> FnOnce(&'static T::This<'brand>) -> U) -> U`.
     /// This would allow the compiler to assume that `&'static T::This<'brand>` is well formed so `'brand` must outlive `'static`.
     /// Since the only lifetime this is true for is `'static`, this would imply `'brand='static` simplifying the signature to
     /// `(&'static self, f: impl FnOnce(&'static T::This<'static>) -> U) -> U`.
     /// With the HRTB gone we can simply pass the identity function which will allow `T::This<'static>` to escape
     ///
-    /// The name `borrow_hkt` is chosen to leave the `borrow` open for if a more ergonomic solution is found
+    /// Unfortunately this function often seems to produces type errors when passing in anonymous functions, so passing
+    /// in a named function or manually implementing `BrandFn` may be required
     ///
     /// # Examples
     ///
@@ -46,14 +83,18 @@ impl<T: Branded> Erased<T> {
     /// use std::marker::PhantomData;
     /// use erased_brand::{Branded, Erased};
     /// use erased_brand::hkt;
-    /// struct PhantomBrand<'a>(PhantomData<*mut &'a ()>);
-    /// struct PhantomBrandHKT;
-    /// impl Branded for PhantomBrandHKT {
-    ///     type This<'brand> = (u32, PhantomBrand<'brand>);
+    /// struct PhantomBrand<'brand>(PhantomData<*mut &'brand ()>);
+    /// struct PhantomBrandHKT<X>(PhantomData<X>);
+    /// impl<X> Branded for PhantomBrandHKT<X> {
+    ///     type This<'brand> = (X, PhantomBrand<'brand>);
     /// }
     ///
-    /// fn good(x: &'static Erased<PhantomBrandHKT>) {
-    ///     let good: &'static u32 = x.borrow_hkt::<hkt::Ref<_>>(|x| &x.0);
+    /// fn f0<'a, 'brand, X>(x: &'a (X, PhantomBrand<'brand>)) -> &'a X {
+    ///     &x.0
+    /// }
+    ///
+    /// fn good<X>(x: &Erased<PhantomBrandHKT<X>>) -> &X {
+    ///     x.borrow(f0)
     /// }
     /// ```
     ///
@@ -61,31 +102,63 @@ impl<T: Branded> Erased<T> {
     /// use std::marker::PhantomData;
     /// use erased_brand::{Branded, Erased};
     /// use erased_brand::hkt;
-    /// struct PhantomBrand<'a>(PhantomData<*mut &'a ()>);
+    /// struct PhantomBrand<'brand>(PhantomData<*mut &'brand ()>);
     /// struct PhantomBrandHKT;
     /// impl Branded for PhantomBrandHKT {
     ///     type This<'brand> = PhantomBrand<'brand>;
     /// }
     ///
-    /// fn unsound(x: &'static Erased<PhantomBrandHKT>) {
-    ///     let bad = x.borrow_hkt::<hkt::Ref<_>>(|x| x);
+    /// fn id<'a: 'static, 'brand>(x: &'a PhantomBrand<'brand>) -> &'a PhantomBrand<'static> {
+    ///     x
+    /// }
+    ///
+    ///
+    /// fn unsound(x: &'static Erased<PhantomBrandHKT>) -> &'static PhantomBrand<'static> {
+    ///     x.borrow(id)
     /// }
     /// ```
-    pub fn borrow_hkt<'a, U: HKTRef>(
-        &'a self,
-        f: impl for<'a1, 'brand> FnOnce(&'a1 T::This<'brand>) -> U::This<'a1>,
-    ) -> U::This<'a> {
-        f(&self.0)
+    /// ```
+    /// use std::collections::HashMap;
+    /// use std::marker::PhantomData;
+    /// use erased_brand::{Branded, Erased};
+    /// use erased_brand::erased::BrandFn;
+    /// use erased_brand::hkt;
+    /// struct PhantomBrand<'brand>(PhantomData<*mut &'brand ()>);
+    /// struct PhantomBrandHKT<X>(PhantomData<X>);
+    /// impl<X> Branded for PhantomBrandHKT<X> {
+    ///     type This<'brand> = (HashMap<String, X>, PhantomBrand<'brand>);
+    /// }
+    ///
+    /// struct Lookup<'b>(&'b str);
+    ///
+    /// impl<'a, 'b, X> BrandFn<'a, PhantomBrandHKT<X>> for Lookup<'b> {
+    ///     type Output = &'a X where X: 'a;
+    ///
+    ///     fn call<'brand>(self, x: &'a <PhantomBrandHKT<X> as Branded>::This<'brand>) -> Self::Output {
+    ///         &x.0[self.0]
+    ///     }
+    /// }
+    ///
+    /// fn good<'a, 'b, X>(x: &'a Erased<PhantomBrandHKT<X>>, key: &'b str) -> &'a X {
+    ///     x.borrow(Lookup(key))
+    /// }
+    /// ```
+
+    pub fn borrow<'a, F>(&'a self, f: F) -> <F as BrandFn<'a, T>>::Output
+    where
+        F: for<'a1> BrandFn<'a1, T>,
+    {
+        f.call(&self.0)
     }
 
     /// Calls `f` with mutable access to the internal data and returns it's result.
     ///
-    /// See [`Self::borrow_hkt`] for details on the unusual signature
-    pub fn borrow_mut_hkt<'a, U: HKTRef>(
-        &'a mut self,
-        f: impl for<'a1, 'brand> FnOnce(&'a1 mut T::This<'brand>) -> U::This<'a1>,
-    ) -> U::This<'a> {
-        f(&mut self.0)
+    /// See [`Self::borrow_hkt`] for details
+    pub fn borrow_mut_hkt<'a, F>(&'a mut self, f: F) -> <F as BrandMutFn<'a, T>>::Output
+    where
+        F: for<'a1> BrandMutFn<'a1, T>,
+    {
+        f.call(&mut self.0)
     }
 }
 
@@ -96,7 +169,7 @@ impl<T: Branded2 + for<'brand> Branded<This<'brand> = Erased<Branded2Wrap<'brand
     /// `T::This2<'brand1, 'brand2>` must not contain two versions of the same singleton type (one for each brand)
     ///
     /// Note: A good strategy for writing a safe wrapper would be to force the caller
-    /// to expose two versions of the same singleton type and then eliminate one of them before calling this method.
+    /// to expose a copy of singleton type and then eliminate one of them before calling this method.
     ///
     /// Because of the above technique it is likely a bad idea to have allow different singleton types sharing a brand inside of an [`Erased`].
     /// Since [`Erased`] doesn't allow this to happen when using safely this consideration only applies when dealing with other unsafe code
